@@ -6,9 +6,9 @@ https://www.alphavantage.co/documentation/#etf-profile
 import pandas as pd
 import re
 import requests
-from transform import merge
+#from transform import merge
 from io import StringIO
-from config import cols, ETF_REGISTRY, APIKEY, OUTPUT_PATH
+from config import cols, ETF_REGISTRY, APIKEY, OUTPUT_PATH, PARQUET_FILE_PATH, ETF_list_PATH
 import csv
 from pathlib import Path
 
@@ -37,15 +37,29 @@ class ISharesClient:
         print(ticker, second_line)
         return raw
 
+def load_ETF(ETF_ticker):
+
+        url = f"https://www.alphavantage.co/query?function=ETF_PROFILE&symbol={ETF_ticker}&apikey={APIKEY}"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            raise ValueError(f"Brak danych dla {ETF_ticker}")
+
+        df = pd.DataFrame([data])
+        output_path = ETF_list_PATH / f"{ETF_ticker}.parquet"
+        df.to_parquet(output_path, index=False)
+        return df
+
 def main():
 
     # client = ISharesClient()
     # client_SWDA = ISharesClient()
-    PARQUET_FILE = Path("etf_list.parquet")
+    PARQUET_FILE = Path(PARQUET_FILE_PATH)
 
     if PARQUET_FILE.exists():
         df = pd.read_parquet(PARQUET_FILE)
-        print("Wczytano z istniejącego pliku Parquet.")
+        #print("Wczytano z istniejącego pliku Parquet.")
     else:
     
         CSV_URL = 'https://www.alphavantage.co/query?function=LISTING_STATUS&apikey={APIKEY}}'
@@ -62,18 +76,36 @@ def main():
 
 # zamiana w DataFrame
             df = pd.DataFrame(data_rows, columns=headers)
-            df.to_parquet("etf_list.parquet", index=False)
+            df.to_parquet(PARQUET_FILE_PATH, index=False)
 
 # późniejsze wczytanie
-    df_loaded = pd.read_parquet("etf_list.parquet")
-    nasd = df_loaded[df_loaded["symbol"] == "SPY"]
-        
-    print(nasd)
+    df_loaded = pd.read_parquet(PARQUET_FILE_PATH)
 
+    ticker = "REMX"
+    nasd = df_loaded[df_loaded["symbol"] == ticker]
+    TICKER_PATH = Path(f"F:\ITwork\API_ETF_ALPHA\data\{ticker}.parquet")
+    if TICKER_PATH.exists():
+        df = pd.read_parquet(TICKER_PATH)
+        print(f"Wczytano {ticker} z istniejącego pliku Parquet.")
+    else:
+        load_ETF(ticker)
+        print("Wczytano z API.")    
+        
+    df = pd.read_parquet(TICKER_PATH)
+    
+    holdings_df = (
+    df[["holdings"]]
+    .explode("holdings")
+    .dropna()
+)
+
+    holdings_df = pd.json_normalize(holdings_df["holdings"])
+
+    print(holdings_df.head(10))
+    
     #raw_csv = client.fetch("SOXX")
      
     
-    #raw_csv_SWDA = client.fetch("SWDA")
 
     # df = pd.read_csv(client.build_url("SOXX"), skiprows=10, header=None)   
     # df_SWDA = pd.read_csv(client_SWDA.build_url_2("SWDA"), skiprows=10, header=None)    

@@ -2,119 +2,211 @@
 Scrape and compare ETF chart data from alphavantage
 https://www.alphavantage.co/documentation/#etf-profile
 """
-
 import pandas as pd
 import re
 import requests
-#from transform import merge
+#from transform import load
+from extract import load_ETF, load_ETF_LIST, ETF_ADD, ETF_holdings
+from load import save_raport
 from io import StringIO
 from config import cols, ETF_REGISTRY, APIKEY, OUTPUT_PATH, PARQUET_FILE_PATH, ETF_list_PATH
 import csv
 from pathlib import Path
+import sys 
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import queue
 
-def save_raport(df, OUTPUT_PATH):
-    df.to_csv(OUTPUT_PATH, index=False)
+DATA_DIR = ETF_list_PATH
 
-class ISharesClient:
-    BASE_SUFFIX = "1467271812596.ajax" #numer ajax nie jest przypadkowy — ale też nie zmienia się od lat.
+class AddETFWindow(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
 
-    def build_url(self, ticker):
-        meta = ETF_REGISTRY[ticker]
-        return (
-            f"https://www.ishares.com/{meta['region']}/products/{meta['id']}/{meta.get('slug')}/"
-            f"{self.BASE_SUFFIX}"
-            f"?fileType=csv&fileName={ticker}_holdings&dataType=fund"
+        self.title("Dodaj ETF")
+        self.geometry("300x120")
+
+        ttk.Label(self, text="Ticker:").pack(pady=5)
+
+        self.ticker_var = tk.StringVar()
+        ttk.Entry(self, textvariable=self.ticker_var).pack()
+
+        ttk.Button(self, text="Dodaj", command=self.add_etf).pack(pady=10)
+
+    def add_etf(self):
+        ticker = self.ticker_var.get().strip().upper()
+
+        if not ticker:
+            messagebox.showerror("Błąd", "Podaj ticker")
+            return
+
+        df = pd.read_parquet(PARQUET_FILE_PATH)
+        if df["symbol"].eq(ticker).any():
+            ETF_ADD(ticker)
+            messagebox.showinfo("Informacja", "Dodano")
+
+        else:
+            print("Nie można pobrać danych. Taki ETF nie istnieje w bazie")  
+
+        
+        self.parent.refresh_list()
+        self.destroy()
+
+
+class ETFSelector(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("ETF Portfolio Builder")
+        self.geometry("500x600")
+
+        self.etf_vars = {}     # ticker -> BooleanVar
+        self.weight_vars = {}  # ticker -> StringVar
+
+        self._build_ui()
+        self.refresh_list()
+        self._updating = False
+
+    def _build_ui(self):
+        top_frame = ttk.Frame(self)
+        top_frame.pack(fill="x", pady=5)
+
+        ttk.Button(top_frame, text="Dodaj ETF", command=self.open_add_window).pack()
+
+        self.canvas = tk.Canvas(self)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scroll_frame = ttk.Frame(self.canvas)
+
+        self.scroll_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
         )
-    def build_url_2(self, ticker):
-        meta = ETF_REGISTRY[ticker]
-        return (
-            f"https://www.ishares.com/uk/individual/en/products/251882/ishares-msci-world-ucits-etf-acc-fund/1506575576011.ajax?fileType=csv&fileName=SWDA_holdings&dataType=fund"
+
+        self.canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        ttk.Button(self, text="Zatwierdź", command=self.get_selection).pack(pady=10)
+        
+    def refresh_list(self):
+        # wyczyść UI
+        for widget in self.scroll_frame.winfo_children():
+            widget.destroy()
+
+        self.etf_vars.clear()
+        self.weight_vars.clear()
+
+        tickers = sorted([p.stem for p in DATA_DIR.glob("*.parquet")])
+
+        for ticker in tickers:
+            frame = ttk.Frame(self.scroll_frame)
+            frame.pack(fill="x", pady=2, padx=5)
+
+            var = tk.BooleanVar()
+            weight_var = tk.StringVar()
+
+            self.etf_vars[ticker] = var
+            self.weight_vars[ticker] = weight_var
+
+            chk = ttk.Checkbutton(frame, text=ticker, variable=var)
+            chk.pack(side="left")
+
+            entry = ttk.Entry(frame, textvariable=weight_var, width=8)
+            entry.pack(side="right")
+
+            # 🔹 automatyczne przeliczenie
+            #weight_var.trace_add("write", self.recalculate_percentages)
+
+    def recalculate_percentages(self, *args):
+        if self._updating:
+            return
+
+        self._updating = True
+
+        try:
+            values = []
+            for var in self.weight_vars.values():
+                try:
+                    values.append(float(var.get()))
+                except (ValueError, TypeError):
+                    values.append(0.0)
+
+            total = sum(values)
+
+            if total == 0:
+                return
+
+            for var, val in zip(self.weight_vars.values(), values):
+                percent = (val / total) * 100
+                var.set(f"{percent:.2f}")
+
+        finally:
+            self._updating = False
+
+    def przelicz(self, df):
+
+        df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
+        df["weight_portolio"] = pd.to_numeric(df["weight_portolio"], errors="coerce")
+        df = df.loc[df["weight"] >= 0].copy()
+        
+        df = df.loc[
+            ~(
+                (df["symbol"] == "n/a") &
+                (df["description"] == "n/a")
+            )
+        ].copy()
+        df["stock_weight_at_portofolio"] = ((df["weight"] * df["weight_portolio"]))
+        df = (
+            df
+            .groupby("description", as_index=False)
+            .agg({
+                "symbol": "first",  # tylko do wyświetlania
+                "stock_weight_at_portofolio": "sum"
+            })
+            .sort_values("stock_weight_at_portofolio", ascending=False)
+            .reset_index(drop=True)
         )
-    def fetch(self, ticker):
-        url = self.build_url(ticker)
-        raw = requests.get(url, timeout=30).text
-        second_line = raw.splitlines()[1]
-        print(ticker, second_line)
-        return raw
-
-def load_ETF(ETF_ticker):
-
-        url = f"https://www.alphavantage.co/query?function=ETF_PROFILE&symbol={ETF_ticker}&apikey={APIKEY}"
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        if not data:
-            raise ValueError(f"Brak danych dla {ETF_ticker}")
-
-        df = pd.DataFrame([data])
-        output_path = ETF_list_PATH / f"{ETF_ticker}.parquet"
-        df.to_parquet(output_path, index=False)
+        
         return df
+        
+        
+
+    def get_selection(self):
+        selected = {}
+        dfs = []
+        for ticker, var in self.etf_vars.items():
+            if var.get():
+                selected[ticker] = self.weight_vars[ticker].get()
+                file_path = Path(ETF_list_PATH) / f"{ticker}.parquet"
+                
+                df_part = ETF_holdings(file_path)
+
+                if not df_part.empty:
+                    df_part["weight_portolio"] = self.weight_vars[ticker].get()
+                    dfs.append(df_part)
+                portfolio_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+                portfolio_df = self.przelicz(portfolio_df)
+          
+        print(portfolio_df)
+        return portfolio_df
+
+    def open_add_window(self):
+        AddETFWindow(self)
 
 def main():
 
     # client = ISharesClient()
     # client_SWDA = ISharesClient()
-    PARQUET_FILE = Path(PARQUET_FILE_PATH)
 
-    if PARQUET_FILE.exists():
-        df = pd.read_parquet(PARQUET_FILE)
-        #print("Wczytano z istniejącego pliku Parquet.")
-    else:
-    
-        CSV_URL = 'https://www.alphavantage.co/query?function=LISTING_STATUS&apikey={APIKEY}}'
-
-        with requests.Session() as s:
-            download = s.get(CSV_URL)
-            download.raise_for_status()  # dopilnuj, żeby nie przeszło 404/500
-            decoded_content = download.content.decode('utf-8')
-            cr = csv.reader(decoded_content.splitlines(), delimiter=',')
-            my_list = list(cr)
-            # pierwszy wiersz to nagłówki
-            headers = my_list[0]
-            data_rows = my_list[1:]
-
-# zamiana w DataFrame
-            df = pd.DataFrame(data_rows, columns=headers)
-            df.to_parquet(PARQUET_FILE_PATH, index=False)
-
-# późniejsze wczytanie
-    df_loaded = pd.read_parquet(PARQUET_FILE_PATH)
-
-    ticker = "REMX"
-    nasd = df_loaded[df_loaded["symbol"] == ticker]
-    TICKER_PATH = Path(f"F:\ITwork\API_ETF_ALPHA\data\{ticker}.parquet")
-    if TICKER_PATH.exists():
-        df = pd.read_parquet(TICKER_PATH)
-        print(f"Wczytano {ticker} z istniejącego pliku Parquet.")
-    else:
-        load_ETF(ticker)
-        print("Wczytano z API.")    
-        
-    df = pd.read_parquet(TICKER_PATH)
-    
-    holdings_df = (
-    df[["holdings"]]
-    .explode("holdings")
-    .dropna()
-)
-
-    holdings_df = pd.json_normalize(holdings_df["holdings"])
-
-    print(holdings_df.head(10))
-    
-    #raw_csv = client.fetch("SOXX")
-     
+    ticker = "KWEB"
+    #nasd = df_loaded[df_loaded["symbol"] == ticker]
+    #ETF_ADD(ticker)
     
 
-    # df = pd.read_csv(client.build_url("SOXX"), skiprows=10, header=None)   
-    # df_SWDA = pd.read_csv(client_SWDA.build_url_2("SWDA"), skiprows=10, header=None)    
-    # df.columns = cols + list(df.columns[len(cols):])
-    # df_SWDA.columns = cols
-    # df["waga"] = 0.4
-    
-    # df_SWDA["waga"] = 0.6
-   
     # merge(df, df_SWDA)
 
     # df_merge = pd.concat([df, df_SWDA], ignore_index=True)
@@ -131,4 +223,6 @@ def main():
     # print(df_merge)
 
 if __name__ == "__main__":
-    main()
+    app = ETFSelector()
+    app.mainloop()
+   # main()

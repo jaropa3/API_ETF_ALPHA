@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ETF_REGISTRY = {
     "SOXX": {"id": "239705", "region": "us", "slug" : "ishares-phlx-semiconductor-etf"},
     "SWDA": {"id": "251882", "region": "uk", "slug": "ishares-msci-world-ucits-etf-acc-fund"},
@@ -30,5 +29,7 @@ ETF_list = {
     "QWD",
 
 }
+
 PARQUET_FILE_PATH = "F:\ITwork\API_ETF_ALPHA\data\etf_list.parquet"
-ETF_list_PATH = Path(r"F:\ITwork\API_ETF_ALPHA\data")
+
+ETF_list_PATH = Path(r"F:\ITwork\API_ETF_ALPHA\data\etf_holdings")
